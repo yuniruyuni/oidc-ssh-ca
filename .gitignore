@@ -1,0 +1,6 @@
+/oidc-ssh-ca
+/dist/
+*.pem
+*_ca
+*_ca.pub
+/testdata/tmp/
