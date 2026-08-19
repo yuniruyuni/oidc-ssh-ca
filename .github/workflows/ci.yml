@@ -67,3 +67,16 @@ jobs:
           go-version: 'stable'
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  nix:
+    name: Nix build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-25.11
+      - run: nix build .#oidc-ssh-ca --print-build-logs
+      - run: ./result/bin/oidc-ssh-ca --help 2>&1 | head -20 || true
+      - name: NixOS モジュールが評価できること
+        run: nix eval .#nixosModules.default --apply builtins.isFunction
