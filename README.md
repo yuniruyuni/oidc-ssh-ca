@@ -17,7 +17,8 @@ permissions:
   id-token: write        # これが要る
 
 steps:
-  - uses: yuniruyuni/oidc-ssh-ca/action@main
+  # 認可を担う action なので commit SHA で固定することを推奨する。
+  - uses: yuniruyuni/oidc-ssh-ca/action@<commit-sha>  # v0.1.0
     with:
       endpoint: https://ssh-ca.example.net
       host: prod
@@ -163,6 +164,15 @@ OIDC_SSH_CA_SKIP_E2E=1 go test ./...  # sshd を起動しない
 ## 状態
 
 **動作するが、実運用の実績はまだ無い。** インターフェースは変わりうる。
+
+**このツールは SSH の認可を担う。** 利用前に [SECURITY.md](./SECURITY.md) の
+「防がないもの」と「既知の制限」に目を通すこと。特に以下は範囲外:
+
+- 接続先ホストの検証 (`known_hosts` は利用者の責任)
+- `force-command` の先で実行されるスクリプトの安全性
+- レート制限 (トンネルやリバースプロキシの背後に置くこと)
+
+`nix/` 配下は**未検証**。`nix build` を通していない。
 
 ## ライセンス
 
