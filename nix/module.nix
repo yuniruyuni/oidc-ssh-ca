@@ -12,12 +12,11 @@ let
 
   # rule の属性をそのまま TOML へ写す。値の妥当性はサーバ側が起動時に
   # 検証するため、ここでは形だけを整える。
-  # 生成モードでは StateDirectory 上の鍵を、agenix 等から渡す場合は
-  # systemd credential として渡された鍵を使う。
-  caKeyPath =
-    if cfg.generateCAKey
-    then "/var/lib/oidc-ssh-ca/ca"
-    else "/run/credentials/oidc-ssh-ca.service/ca";
+  # 鍵はどちらの経路でも systemd credential として渡す。生成した鍵も
+  # agenix の鍵も同じ扱いにすることで、サービス側の分岐を無くす。
+  caKeyPath = "/run/credentials/oidc-ssh-ca.service/ca";
+
+  generatedKey = "/var/lib/oidc-ssh-ca/ca";
 
   settings = {
     inherit (cfg) listen;
@@ -25,16 +24,6 @@ let
     issuer = cfg.issuer;
     rule = cfg.rules;
   };
-
-  # 鍵が無ければ作る。既にあれば触らない。
-  generateScript = pkgs.writeShellScript "oidc-ssh-ca-generate" ''
-    set -eu
-    key=/var/lib/oidc-ssh-ca/ca
-    if [ ! -f "$key" ]; then
-      ${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N "" -C "oidc-ssh-ca" -f "$key"
-      echo "CA 鍵を生成した。sshd の TrustedUserCAKeys に $key.pub を設定すること。"
-    fi
-  '';
 
   configFile = (pkgs.formats.toml { }).generate "oidc-ssh-ca.toml" settings;
 in
@@ -128,31 +117,59 @@ in
       }
     ];
 
+    # 鍵生成は root の oneshot で行う。
+    #
+    # メインサービスの ExecStartPre で ssh-keygen を動かすと、DynamicUser の
+    # 動的 UID に対して getpwuid が引けず "No user exists for uid" で失敗する。
+    # 生成だけを通常の root ユニットへ分離し、鍵は credential として渡す。
+    systemd.services.oidc-ssh-ca-keygen = lib.mkIf cfg.generateCAKey {
+      description = "Generate the oidc-ssh-ca CA key if missing";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "oidc-ssh-ca.service" ];
+
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        StateDirectory = "oidc-ssh-ca";
+        StateDirectoryMode = "0700";
+        UMask = "0077";
+      };
+
+      script = ''
+        if [ ! -f ${generatedKey} ]; then
+          ${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N "" -C oidc-ssh-ca -f ${generatedKey}
+          echo "CA 鍵を生成した: ${generatedKey}.pub"
+        fi
+        # sshd が読めるように公開鍵だけ緩める。
+        chmod 0644 ${generatedKey}.pub
+      '';
+    };
+
     systemd.services.oidc-ssh-ca = {
       description = "OIDC SSH certificate authority";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
+      requires = lib.mkIf cfg.generateCAKey [ "oidc-ssh-ca-keygen.service" ];
+      after = [ "network-online.target" ] ++ lib.optional cfg.generateCAKey "oidc-ssh-ca-keygen.service";
+
       serviceConfig = {
-        ExecStartPre = lib.mkIf cfg.generateCAKey [ "${generateScript}" ];
         ExecStart = "${cfg.package}/bin/oidc-ssh-ca -config ${configFile}";
-        StateDirectory = "oidc-ssh-ca";
-        StateDirectoryMode = "0700";
         Restart = "on-failure";
         RestartSec = "5s";
 
         DynamicUser = true;
         # CA 鍵は systemd が読み、サービスには credential として渡す。
         # サービスユーザにファイルの読み取り権限を与えなくて済む。
-        LoadCredential = lib.mkIf (cfg.caKeyFile != null) [ "ca:${toString cfg.caKeyFile}" ];
+        LoadCredential = [
+          "ca:${if cfg.caKeyFile != null then toString cfg.caKeyFile else generatedKey}"
+        ];
 
         # このサービスは鍵に署名して HTTP で返すだけ。それ以外は何も要らない。
         NoNewPrivileges = true;
         PrivateTmp = true;
         PrivateDevices = true;
         ProtectSystem = "strict";
-        ReadWritePaths = lib.mkIf cfg.generateCAKey [ "/var/lib/oidc-ssh-ca" ];
         ProtectHome = true;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
