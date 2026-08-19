@@ -1,10 +1,4 @@
-# oidc-ssh-ca のパッケージ定義。
-#
-# ⚠️ このファイルは未検証です。`nix build` を通していません。
-#
-# vendorHash が lib.fakeHash のままなので、このままではビルドが失敗します
-# (fakeHash は「実際の値を教えるためにわざと失敗させる」ための placeholder)。
-# 一度ビルドを走らせ、エラーに表示される got: の値へ置き換えてください。
+# oidc-ssh-ca のパッケージ定義。CI (Nix build ジョブ) で検証している。
 { lib, buildGoModule }:
 
 buildGoModule {
@@ -13,8 +7,8 @@ buildGoModule {
 
   src = lib.cleanSource ../.;
 
-  # `nix build` が報告する値に置き換えること。
-  vendorHash = lib.fakeHash;
+  # 依存を変更したら CI が報告する値へ更新すること。
+  vendorHash = "sha256-WPuhVJ6l+f82dei3Az7tk34vTj4Kih60h0+a2Jmcd3k=";
 
   # e2e は sshd の起動を伴うためビルドサンドボックス内では実行しない。
   checkFlags = [ "-skip" "TestE2E" ];
