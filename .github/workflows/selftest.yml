@@ -1,0 +1,167 @@
+# 本物の GitHub OIDC トークンで通しの検査を行う。
+#
+# 単体テストと e2e はテスト用の IDP を立てて署名している。実際の GitHub が
+# 発行するトークンの claim 名や形式が想定とずれていても気づけないため、
+# ここでは本物のトークンを使い、実際の sshd へ接続するところまで通す。
+name: Self test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - name: Build
+        run: go build -o /tmp/oidc-ssh-ca ./cmd/oidc-ssh-ca
+
+      - name: Prepare CA, host key and forced command
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ca
+          ssh-keygen -q -t ed25519 -N '' -C selftest-ca -f /tmp/ca/ca
+          ssh-keygen -q -t ed25519 -N '' -C selftest-host -f /tmp/ca/host
+          printf '#!/bin/sh\necho SELFTEST-FORCED\necho "original=[$SSH_ORIGINAL_COMMAND]"\n' > /tmp/ca/forced.sh
+          chmod +x /tmp/ca/forced.sh
+          echo selftest > /tmp/ca/principals
+
+      # 実際の workflow_ref / repository_id をそのまま制約に使う。
+      # 値を推測せず context から取ることで、claim 名や形式の思い違いを防ぐ。
+      - name: Write config
+        env:
+          REPO_ID: ${{ github.repository_id }}
+          OWNER_ID: ${{ github.repository_owner_id }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/ca/config.toml <<CONF
+          listen = "127.0.0.1:8129"
+          ca_key_path = "/tmp/ca/ca"
+
+          [[rule]]
+          name                = "selftest"
+          audience            = "https://selftest.invalid"
+          repository_id       = "${REPO_ID}"
+          repository_owner_id = "${OWNER_ID}"
+          workflow_ref        = "${WORKFLOW_REF}"
+          job_workflow_ref    = "${WORKFLOW_REF}"
+          ref                 = "${REF}"
+          principals          = ["selftest"]
+          force_command       = "/tmp/ca/forced.sh"
+          validity            = "5m"
+          CONF
+          /tmp/oidc-ssh-ca -config /tmp/ca/config.toml -check-config
+
+      - name: Start issuer
+        run: |
+          set -euo pipefail
+          /tmp/oidc-ssh-ca -config /tmp/ca/config.toml > /tmp/ca/issuer.log 2>&1 &
+          for _ in $(seq 1 50); do
+            if curl -sf http://127.0.0.1:8129/healthz > /dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          echo "issuer が起動しない" >&2
+          cat /tmp/ca/issuer.log >&2
+          exit 1
+
+      - name: Start sshd
+        run: |
+          set -euo pipefail
+          cat > /tmp/ca/sshd_config <<CONF
+          Port 8022
+          ListenAddress 127.0.0.1
+          HostKey /tmp/ca/host
+          PidFile /tmp/ca/sshd.pid
+          LogLevel VERBOSE
+          UsePAM no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          StrictModes no
+          PrintMotd no
+          TrustedUserCAKeys /tmp/ca/ca.pub
+          AuthorizedPrincipalsFile /tmp/ca/principals
+          AuthorizedKeysFile /dev/null
+          Subsystem sftp /bin/false
+          CONF
+          /usr/sbin/sshd -D -e -f /tmp/ca/sshd_config > /tmp/ca/sshd.log 2>&1 &
+          for _ in $(seq 1 50); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8022) 2>/dev/null; then exit 0; fi
+            sleep 0.2
+          done
+          echo "sshd が起動しない" >&2
+          cat /tmp/ca/sshd.log >&2
+          exit 1
+
+      # ここが本題。本物の OIDC トークンで証明書を取得する。
+      - name: Get certificate
+        id: cert
+        uses: ./action
+        with:
+          endpoint: http://127.0.0.1:8129
+          audience: https://selftest.invalid
+
+      - name: Connect and verify force-command
+        run: |
+          set -euo pipefail
+          out="$(ssh -p 8022 \
+            -i "${{ steps.cert.outputs.key-path }}" \
+            -o "CertificateFile=${{ steps.cert.outputs.certificate-path }}" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o BatchMode=yes \
+            "$(id -un)@127.0.0.1" 'echo SHOULD_NOT_RUN')"
+          echo "$out"
+
+          echo "$out" | grep -q SELFTEST-FORCED \
+            || { echo "force-command が実行されていない" >&2; exit 1; }
+          echo "$out" | grep -q 'original=\[echo SHOULD_NOT_RUN\]' \
+            || { echo "SSH_ORIGINAL_COMMAND が渡っていない" >&2; exit 1; }
+          if echo "$out" | grep -qx SHOULD_NOT_RUN; then
+            echo "要求したコマンドが実行されてしまった" >&2
+            exit 1
+          fi
+
+      # 制約が実際に効いていることを、本物のトークンで確認する。
+      # audience を変えたトークンは拒否されなければならない。
+      - name: Reject token with wrong audience
+        run: |
+          set -euo pipefail
+          token="$(curl --fail-with-body -sS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fwrong.invalid" | jq -r '.value')"
+
+          ssh-keygen -q -t ed25519 -N '' -f /tmp/ca/probe
+          body="$(jq -n --arg pk "$(cat /tmp/ca/probe.pub)" '{public_key: $pk}')"
+
+          code="$(printf '%s' "$body" | curl -sS -o /tmp/ca/probe.out -w '%{http_code}' \
+            -X POST -H "Authorization: Bearer ${token}" \
+            -H 'Content-Type: application/json' --data-binary @- \
+            http://127.0.0.1:8129/issue)"
+
+          echo "status=${code}"
+          cat /tmp/ca/probe.out
+          if [ "$code" != "403" ]; then
+            echo "audience 違いのトークンが 403 で拒否されなかった" >&2
+            exit 1
+          fi
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "--- issuer ---"; cat /tmp/ca/issuer.log || true
+          echo "--- sshd ---";   cat /tmp/ca/sshd.log   || true
