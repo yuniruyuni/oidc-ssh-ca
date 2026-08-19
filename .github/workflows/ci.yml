@@ -27,3 +27,30 @@ jobs:
         with:
           go-version: '1.26'
       - run: go build ./...
+
+  action:
+    name: Action
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: action
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: action/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: node --test src/*.test.ts
+
+      # bundle の更新漏れは JS action の典型的な事故。dist が
+      # ソースと一致していることを CI で強制する。
+      - run: npm run build
+      - name: dist が最新であること
+        run: |
+          if ! git diff --exit-code -- dist; then
+            echo "dist がソースと一致していない。'npm run build' の結果を commit すること。" >&2
+            exit 1
+          fi

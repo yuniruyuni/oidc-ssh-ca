@@ -1,8 +1,8 @@
 name: 'Get SSH certificate from oidc-ssh-ca'
 description: >
   GitHub Actions の OIDC トークンを oidc-ssh-ca に提示し、短命な SSH
-  ユーザ証明書を取得して ~/.ssh に配置する。長期の秘密鍵を GitHub secrets
-  に置く必要がなくなる。
+  ユーザ証明書を取得して配置する。長期の秘密鍵を GitHub secrets に置く
+  必要がなくなる。鍵と証明書はジョブ終了時に削除される。
 
 inputs:
   endpoint:
@@ -10,6 +10,13 @@ inputs:
     required: true
   audience:
     description: 'OIDC トークンの audience。既定は endpoint と同じ値'
+    required: false
+    default: ''
+  known-hosts:
+    description: >
+      known_hosts に追記する内容。ホスト鍵の行か @cert-authority 行を渡す。
+      未指定で host を使う場合は警告する。接続先を検証しなければ、短命な
+      資格情報をそのまま中間者へ渡すことになるため。
     required: false
     default: ''
   host:
@@ -28,88 +35,14 @@ inputs:
 outputs:
   key-path:
     description: '生成した秘密鍵のパス'
-    value: ${{ steps.issue.outputs.key-path }}
   certificate-path:
     description: '取得した証明書のパス'
-    value: ${{ steps.issue.outputs.certificate-path }}
+  principals:
+    description: '証明書に含まれる principal (カンマ区切り)'
+  valid-before:
+    description: '有効期限 (Unix 時刻)'
 
 runs:
-  using: composite
-  steps:
-    - id: issue
-      shell: bash
-      env:
-        ENDPOINT: ${{ inputs.endpoint }}
-        AUDIENCE: ${{ inputs.audience }}
-        SSH_HOST: ${{ inputs.host }}
-        SSH_HOSTNAME: ${{ inputs.hostname }}
-        SSH_USER: ${{ inputs.ssh-user }}
-      run: |
-        # トークンを画面に出さないため、この step ではトレースを有効にしない。
-        set -euo pipefail
-
-        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-          echo "OIDC トークンを要求できない。workflow に 'permissions: id-token: write' が必要。" >&2
-          exit 1
-        fi
-
-        audience="${AUDIENCE:-$ENDPOINT}"
-
-        mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
-        key="$(mktemp -u ~/.ssh/oidc-ssh-ca-XXXXXX)"
-
-        # 鍵はランナー上で使い捨てにする。外へ出ることはない。
-        ssh-keygen -q -t ed25519 -N '' -C "oidc-ssh-ca ${GITHUB_REPOSITORY}#${GITHUB_RUN_ID}" -f "$key"
-
-        # OIDC トークンを取得する。値はログに出さない。
-        token="$(curl --fail-with-body -sS \
-          -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$(printf '%s' "$audience" | jq -sRr @uri)" \
-          | jq -r '.value')"
-        if [ -z "$token" ] || [ "$token" = "null" ]; then
-          echo "OIDC トークンを取得できなかった" >&2
-          exit 1
-        fi
-
-        body="$(jq -n --arg pk "$(cat "${key}.pub")" '{public_key: $pk}')"
-
-        # --fail-with-body により、拒否された場合はサーバの理由が表示される。
-        response="$(printf '%s' "$body" | curl --fail-with-body -sS \
-          -X POST \
-          -H "Authorization: Bearer ${token}" \
-          -H "Content-Type: application/json" \
-          --data-binary @- \
-          "${ENDPOINT%/}/issue")"
-
-        cert="$(printf '%s' "$response" | jq -r '.certificate')"
-        if [ -z "$cert" ] || [ "$cert" = "null" ]; then
-          echo "証明書を受け取れなかった" >&2
-          exit 1
-        fi
-
-        # OpenSSH は <key>-cert.pub を自動で読み込むため、この名前で置けば
-        # CertificateFile の指定は不要になる。
-        printf '%s\n' "$cert" > "${key}-cert.pub"
-        chmod 600 "${key}" "${key}-cert.pub"
-
-        echo "key-path=${key}" >> "$GITHUB_OUTPUT"
-        echo "certificate-path=${key}-cert.pub" >> "$GITHUB_OUTPUT"
-
-        # 有効期限と principal を表示する。秘密ではなく、失敗時の切り分けに要る。
-        ssh-keygen -L -f "${key}-cert.pub" | sed -n '1,12p'
-
-        if [ -n "$SSH_HOST" ]; then
-          : "${SSH_HOSTNAME:?host を指定する場合は hostname も必要}"
-          : "${SSH_USER:?host を指定する場合は ssh-user も必要}"
-          {
-            echo "Host ${SSH_HOST}"
-            echo "  HostName ${SSH_HOSTNAME}"
-            echo "  User ${SSH_USER}"
-            echo "  IdentityFile ${key}"
-            echo "  CertificateFile ${key}-cert.pub"
-            echo "  IdentitiesOnly yes"
-            echo "  BatchMode yes"
-          } >> ~/.ssh/config
-          chmod 600 ~/.ssh/config
-        fi
+  using: node24
+  main: dist/main/index.js
+  post: dist/cleanup/index.js
