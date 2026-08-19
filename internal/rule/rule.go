@@ -141,3 +141,13 @@ func (r Rule) Match(c Claims) Result {
 
 	return allow()
 }
+
+// FromPtr は設定ファイル等のオプショナルな値を Value に変換する。
+// nil を不在、非 nil をその値の存在として扱う。TOML のキー自体が無い場合と
+// 空文字が書かれている場合を区別するために使う。
+func FromPtr(p *string) Value {
+	if p == nil {
+		return Absent()
+	}
+	return Present(*p)
+}
