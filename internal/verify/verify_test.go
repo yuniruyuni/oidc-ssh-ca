@@ -2,103 +2,25 @@ package verify
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/base64"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/coreos/go-oidc/v3/oidc"
-	jose "github.com/go-jose/go-jose/v4"
+	"github.com/yuniruyuni/oidc-ssh-ca/internal/testutil"
 )
 
-const testIssuer = "https://token.actions.githubusercontent.com"
+func baseClaims() map[string]any { return testutil.Claims() }
 
-// idp はテスト用の OIDC プロバイダ。JWKS を配り、トークンを署名する。
-type idp struct {
-	key    *rsa.PrivateKey
-	server *httptest.Server
-}
+func newIDP(t *testing.T) *testutil.IDP { return testutil.NewIDP(t) }
 
-func newIDP(t *testing.T) *idp {
+func verifierFor(t *testing.T, i *testutil.IDP) *Verifier {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	i := &idp{key: key}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
-		set := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
-			Key:       &key.PublicKey,
-			KeyID:     "test-key",
-			Algorithm: "RS256",
-			Use:       "sig",
-		}}}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(set)
-	})
-	i.server = httptest.NewServer(mux)
-	t.Cleanup(i.server.Close)
-	return i
-}
-
-func (i *idp) verifier(t *testing.T) *Verifier {
-	t.Helper()
-	ks := oidc.NewRemoteKeySet(context.Background(), i.server.URL+"/jwks")
-	return NewWithKeySet(testIssuer, ks)
-}
-
-// sign は claims を RS256 で署名して compact serialization を返す。
-func (i *idp) sign(t *testing.T, claims map[string]any) string {
-	t.Helper()
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: i.key},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "test-key"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatal(err)
-	}
-	obj, err := signer.Sign(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := obj.CompactSerialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return raw
-}
-
-// baseClaims は GitHub Actions が実際に載せる形に近い claim 一式。
-func baseClaims() map[string]any {
-	return map[string]any{
-		"iss":                 testIssuer,
-		"aud":                 "https://ssh-ca.example.net",
-		"exp":                 time.Now().Add(5 * time.Minute).Unix(),
-		"iat":                 time.Now().Unix(),
-		"nbf":                 time.Now().Add(-time.Minute).Unix(),
-		"sub":                 "repo:o@1/r@2:environment:production",
-		"repository_id":       "1313852776",
-		"repository_owner_id": "85034901",
-		"workflow_ref":        "o/r/.github/workflows/deploy.yml@refs/heads/main",
-		"job_workflow_ref":    "o/r/.github/workflows/deploy.yml@refs/heads/main",
-		"environment":         "production",
-		"ref":                 "refs/heads/main",
-	}
+	return NewWithKeySet(testutil.Issuer, i.KeySet())
 }
 
 func TestVerify_Valid(t *testing.T) {
 	i := newIDP(t)
-	got, err := i.verifier(t).Verify(context.Background(), i.sign(t, baseClaims()))
+	got, err := verifierFor(t, i).Verify(context.Background(), i.Sign(t, baseClaims()))
 	if err != nil {
 		t.Fatalf("正当なトークンが拒否された: %v", err)
 	}
@@ -128,7 +50,7 @@ func TestVerify_AbsentClaimsStayAbsent(t *testing.T) {
 	delete(c, "environment")
 	delete(c, "ref")
 
-	got, err := i.verifier(t).Verify(context.Background(), i.sign(t, c))
+	got, err := verifierFor(t, i).Verify(context.Background(), i.Sign(t, c))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +72,7 @@ func TestVerify_EmptyClaimIsPresent(t *testing.T) {
 	c := baseClaims()
 	c["environment"] = ""
 
-	got, err := i.verifier(t).Verify(context.Background(), i.sign(t, c))
+	got, err := verifierFor(t, i).Verify(context.Background(), i.Sign(t, c))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +97,7 @@ func TestVerify_Rejects(t *testing.T) {
 			i := newIDP(t)
 			c := baseClaims()
 			tt.mutate(c)
-			if _, err := i.verifier(t).Verify(context.Background(), i.sign(t, c)); err == nil {
+			if _, err := verifierFor(t, i).Verify(context.Background(), i.Sign(t, c)); err == nil {
 				t.Fatal("拒否されるべきトークンが受理された")
 			}
 		})
@@ -184,7 +106,7 @@ func TestVerify_Rejects(t *testing.T) {
 
 func TestVerify_RejectsEmptyToken(t *testing.T) {
 	i := newIDP(t)
-	if _, err := i.verifier(t).Verify(context.Background(), ""); err == nil {
+	if _, err := verifierFor(t, i).Verify(context.Background(), ""); err == nil {
 		t.Fatal("空のトークンが受理された")
 	}
 }
@@ -195,8 +117,8 @@ func TestVerify_RejectsUnknownSigningKey(t *testing.T) {
 	attacker := newIDP(t)
 
 	// attacker の鍵で署名し、victim の JWKS で検証させる。
-	raw := attacker.sign(t, baseClaims())
-	if _, err := victim.verifier(t).Verify(context.Background(), raw); err == nil {
+	raw := attacker.Sign(t, baseClaims())
+	if _, err := verifierFor(t, victim).Verify(context.Background(), raw); err == nil {
 		t.Fatal("未知の鍵で署名されたトークンが受理された")
 	}
 }
@@ -204,17 +126,8 @@ func TestVerify_RejectsUnknownSigningKey(t *testing.T) {
 // alg: none を拒否すること。JWT 実装の古典的な穴。
 func TestVerify_RejectsAlgNone(t *testing.T) {
 	i := newIDP(t)
-
-	b64 := func(v any) string {
-		b, err := json.Marshal(v)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return base64.RawURLEncoding.EncodeToString(b)
-	}
-	raw := b64(map[string]any{"alg": "none", "typ": "JWT"}) + "." + b64(baseClaims()) + "."
-
-	if _, err := i.verifier(t).Verify(context.Background(), raw); err == nil {
+	raw := testutil.UnsignedToken(t, baseClaims())
+	if _, err := verifierFor(t, i).Verify(context.Background(), raw); err == nil {
 		t.Fatal("alg: none のトークンが受理された")
 	}
 }
@@ -223,28 +136,8 @@ func TestVerify_RejectsAlgNone(t *testing.T) {
 // 非対称鍵の公開鍵を HMAC の鍵として使わせる alg 混同攻撃への防御。
 func TestVerify_RejectsSymmetricAlg(t *testing.T) {
 	i := newIDP(t)
-
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.HS256, Key: []byte("0123456789abcdef0123456789abcdef")},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "test-key"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := json.Marshal(baseClaims())
-	if err != nil {
-		t.Fatal(err)
-	}
-	obj, err := signer.Sign(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := obj.CompactSerialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := i.verifier(t).Verify(context.Background(), raw); err == nil {
+	raw := i.SignHS256(t, baseClaims())
+	if _, err := verifierFor(t, i).Verify(context.Background(), raw); err == nil {
 		t.Fatal("HS256 のトークンが受理された")
 	}
 }
@@ -256,7 +149,7 @@ func TestVerify_MultipleAudiencesAreAbsent(t *testing.T) {
 	c := baseClaims()
 	c["aud"] = []string{"https://ssh-ca.example.net", "https://other.example.net"}
 
-	got, err := i.verifier(t).Verify(context.Background(), i.sign(t, c))
+	got, err := verifierFor(t, i).Verify(context.Background(), i.Sign(t, c))
 	if err != nil {
 		t.Fatalf("検証自体は通るべき: %v", err)
 	}
