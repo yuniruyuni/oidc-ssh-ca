@@ -1,5 +1,23 @@
 # oidc-ssh-ca
 
+> ## ⚠️ このリポジトリはアーカイブされています
+>
+> **同じ問題に対して [opkssh](https://github.com/openpubkey/opkssh) という、より良く維持された解があります。新規に採用するならそちらを使ってください。**
+>
+> opkssh は Cloudflare 発で Linux Foundation へ寄贈されており、GitHub Actions を公式サポートし、nixpkgs にも収録されています。そして決定的な点として、**CA 秘密鍵を必要としません**。信頼の起点が OIDC プロバイダの公開鍵だけなので、「CA 鍵が漏れたら全部終わり」という最重要資産が存在しません。
+>
+> このリポジトリは **CA 方式で同じ問題を解いた小さな実装例**として残します。
+>
+> ### opkssh を使う際に踏みやすい落とし穴
+>
+> このツールを書く過程で潰した問題は、opkssh の policy plugin を書く際にもそのまま当てはまります。
+>
+> 1. **欠落した claim が空文字になる。** opkssh は claim が無い場合 `OPKSSH_PLUGIN_*` を `""` に設定します。期待値も未設定だと**両方空文字で一致します**。`OPKSSH_PLUGIN_IDT` を自分でパースして、不在と空文字を区別してください（このリポジトリの `internal/rule` はそれを型で強制しています）
+> 2. **ポリシーは加算 OR で、plugin は拒否できない。** `auth_id` が allow を返せば plugin の deny は無視されます。plugin で絞るなら `~/.opk/auth_id` を含む**すべての `auth_id` を空に**してください
+> 3. **標準ポリシーに AND がない。** 1行1 claim です。`repository_id` かつ `job_workflow_ref` のような条件は plugin が必要です
+> 4. **`repository` ではなく `repository_id` を使う。** リポジトリはリネームでき、解放された名前は第三者が再取得できます
+> 5. **`workflow_ref` と `job_workflow_ref` は別物。** 前者は起点、後者は実際に走っている再利用ワークフローです。片方だけだと隙が残ります
+
 GitHub Actions の OIDC トークンを検証し、claim に束縛された**短命 SSH 証明書**を発行する単一バイナリ。
 
 CI から自前サーバへ SSH するために、`SSH_PRIVATE_KEY` のような**長期の秘密鍵を GitHub secrets へ置くのをやめる**ためのもの。
