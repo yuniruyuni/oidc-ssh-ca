@@ -1,4 +1,10 @@
 # oidc-ssh-ca のパッケージ定義。
+#
+# ⚠️ このファイルは未検証です。`nix build` を通していません。
+#
+# vendorHash が lib.fakeHash のままなので、このままではビルドが失敗します
+# (fakeHash は「実際の値を教えるためにわざと失敗させる」ための placeholder)。
+# 一度ビルドを走らせ、エラーに表示される got: の値へ置き換えてください。
 { lib, buildGoModule }:
 
 buildGoModule {

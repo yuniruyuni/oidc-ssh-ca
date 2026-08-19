@@ -4,7 +4,8 @@
 # ことで、「どのリポジトリのどのワークフローに、どの principal と
 # force-command を与えるか」が構成管理の対象になる。
 #
-# 動作確認は行っていない。利用前に -check-config で設定生成を確かめること。
+# ⚠️ 未検証。NixOS 上で評価していません。利用前に -check-config で
+# 設定生成を確かめてください。
 { config, lib, pkgs, ... }:
 
 let

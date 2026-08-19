@@ -54,3 +54,16 @@ jobs:
             echo "dist がソースと一致していない。'npm run build' の結果を commit すること。" >&2
             exit 1
           fi
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          # パッチ版まで含めて最新を取る。到達可能な標準ライブラリの
+          # 脆弱性はツールチェーンの更新で消えることが多いため。
+          go-version: 'stable'
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
