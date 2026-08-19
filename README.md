@@ -18,15 +18,35 @@ permissions:
 
 steps:
   - uses: yuniruyuni/oidc-ssh-ca/action@main
-    id: cert
     with:
       endpoint: https://ssh-ca.example.net
       host: prod
       hostname: prod.example.net
       ssh-user: deploy
+      known-hosts: ${{ vars.PROD_KNOWN_HOSTS }}
 
   - run: ssh prod deploy "$DIGEST"
 ```
+
+鍵と証明書は**ジョブ終了時に削除される**。
+
+### action の入出力
+
+| 入力 | 必須 | 説明 |
+|---|---|---|
+| `endpoint` | ✓ | oidc-ssh-ca の URL |
+| `audience` | | 既定は `endpoint` と同じ値 |
+| `known-hosts` | | `known_hosts` へ追記する行。ホスト鍵か `@cert-authority` 行 |
+| `host` / `hostname` / `ssh-user` | | 指定すると `ssh_config` に接続設定を書く |
+
+| 出力 | 説明 |
+|---|---|
+| `key-path` / `certificate-path` | 生成物のパス |
+| `principals` / `valid-before` | 証明書の内容 |
+
+> `host` を使うのに `known-hosts` を指定しないと警告する。
+> クライアント側の資格情報を短命にしても、**接続先を検証しなければ
+> 中間者にそのまま渡すことになる**。
 
 サーバ側は、**どのリポジトリのどのワークフローに、どの principal と `force-command` を与えるか**だけを書く。
 
@@ -135,7 +155,10 @@ OIDC_SSH_CA_SKIP_E2E=1 go test ./...  # sshd を起動しない
 
 - **単体テスト** — claim 照合の否定ケース、設定の検証、証明書の組み立て、JWT 検証（`alg: none`・HS256・未知の署名鍵・期限切れ・issuer 違い）
 - **e2e** — 実際の OpenSSH `sshd` を起動し、`force-command` の強制、証明書無し・principal 違い・信頼していない CA の拒否を確認
+- **action の単体テスト** — 失敗時の出力にトークンが混ざらないこと（400/401/403/500 と接続失敗の全経路）、応答の検証、`ssh_config` の追記と除去
 - **self test**（[`.github/workflows/selftest.yml`](./.github/workflows/selftest.yml)）— **本物の GitHub OIDC トークン**で証明書を取得し、実際の sshd へ接続する。claim 名や形式の思い違いはここで露見する
+
+`dist/` はコミットされている。CI がソースとの同期を検査するため、`action/src` を変更したら `npm run build` の結果も commit する。
 
 ## 状態
 
